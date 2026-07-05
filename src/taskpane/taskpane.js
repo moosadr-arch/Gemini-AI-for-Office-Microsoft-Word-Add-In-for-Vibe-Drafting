@@ -61,8 +61,11 @@ marked.setOptions({
 
 // ==================== CONFIGURATION CONSTANTS ====================
 
+const RELEASE_MARKER = "v2.1.0.3";
 const DEFAULT_AUTHOR = "Gemini AI";
 const GLANCE_COLLAPSED_STORAGE_KEY = "glanceCollapsed";
+
+globalThis.__GEMINI_TASKPANE_RELEASE__ = RELEASE_MARKER;
 
 // Safety settings for Gemini API (disable all safety blocks)
 const SAFETY_SETTINGS_BLOCK_NONE = [

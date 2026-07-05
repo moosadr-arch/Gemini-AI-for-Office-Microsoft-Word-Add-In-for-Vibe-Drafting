@@ -1,6 +1,7 @@
 import './setup-xml-provider.mjs';
 import assert from 'assert';
 import {
+  applyRedlineChangesToWordContext,
   insertContentAsNativeParagraphs,
   prepareNativeMarkdownParagraphs,
   segmentNativeInsertionBlocks
@@ -321,6 +322,55 @@ async function testTopLevelNumberedLinesStayLiteral() {
   ]);
 }
 
+async function testApplyRedlineChangesInsertsIntoEmptyParagraphBeforeConversion() {
+  const log = [];
+  const infos = [];
+  const warnings = [];
+  const anchor = makeMockParagraph(log, 'P1');
+  anchor.text = '';
+
+  const paragraphs = {
+    items: [anchor],
+    load(property) {
+      log.push({ op: 'loadParagraphs', property });
+    }
+  };
+  const context = {
+    sync: async () => {},
+    document: {
+      body: {
+        paragraphs
+      }
+    }
+  };
+
+  const result = await applyRedlineChangesToWordContext(
+    context,
+    [{
+      paragraphIndex: 1,
+      operation: 'edit_paragraph',
+      newContent: 'Silent lines of code,\nContracts bind our virtual worlds,\nKabam stands secure.'
+    }],
+    {
+      onInfo: (message) => infos.push(message),
+      onWarn: (message) => warnings.push(message)
+    }
+  );
+
+  assert.strictEqual(result.changesApplied, 1);
+  assert.deepStrictEqual(result.skipped, []);
+  assert.ok(infos.some((message) => message.includes('before redline conversion')));
+  assert.ok(!warnings.some((message) => message.includes('Target paragraph text is empty')));
+  assert.deepStrictEqual(
+    log.filter((entry) => entry.op === 'insertText' || entry.op === 'insertParagraph').map((entry) => [entry.op, entry.text, entry.location]),
+    [
+      ['insertText', 'Silent lines of code,', 'Replace'],
+      ['insertParagraph', 'Contracts bind our virtual worlds,', 'After'],
+      ['insertParagraph', 'Kabam stands secure.', 'After']
+    ]
+  );
+}
+
 await testFillAnchorMode();
 await testAppendMode();
 await testSingleLine();
@@ -332,5 +382,6 @@ await testFillAnchorLeadingBulletsReplaceAnchor();
 await testTableBlockRendersTableOoxml();
 await testOoxmlFailureFallsBackToLiteralBullets();
 await testTopLevelNumberedLinesStayLiteral();
+await testApplyRedlineChangesInsertsIntoEmptyParagraphBeforeConversion();
 
 console.log('empty_paragraph_insertion_tests passed');

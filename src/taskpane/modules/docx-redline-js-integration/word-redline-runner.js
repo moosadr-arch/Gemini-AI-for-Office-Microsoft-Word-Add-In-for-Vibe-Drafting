@@ -982,9 +982,36 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
             const scopeParagraphCount = insertionBeforeStart
                 ? 1
                 : (endIndex - effectiveStartIndex) + 1;
+            const sourceParagraphText = String(startParagraph.text || '');
+            const emptySingleTarget = !insertionBeforeStart
+                && scopeParagraphCount === 1
+                && sourceParagraphText.trim().length === 0;
+
+            if (
+                emptySingleTarget
+                && (
+                    operationName === 'edit_paragraph'
+                    || operationName === 'replace_paragraph'
+                    || operationName === 'replace_range'
+                )
+            ) {
+                const insertContent = normalizeReplacementText(getReplacementText(normalizedChange, operationName));
+                if (insertContent.trim()) {
+                    onInfo(`Empty target P${change?.paragraphIndex}: inserting content as a native tracked change before redline conversion.`);
+                    await insertContentAsNativeParagraphs(context, startParagraph, insertContent, {
+                        fillAnchor: true,
+                        author: options.author,
+                        generateRedlines: options.generateRedlines,
+                        disableNativeTracking: options.disableNativeTracking,
+                        baseTrackingMode: options.baseTrackingMode ?? null
+                    });
+                    changesApplied += 1;
+                    continue;
+                }
+            }
 
             const converted = toScopedSharedRedlineOperation(normalizedChange, {
-                scopeStartText: startParagraph.text || '',
+                scopeStartText: sourceParagraphText,
                 scopeParagraphCount,
                 insertionBeforeStart
             });
