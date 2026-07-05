@@ -9,7 +9,7 @@
     "start": "node src/server.mjs"
   },
   "dependencies": {
-    "@ansonlai/docx-redline-js": "0.1.3",
+    "@ansonlai/docx-redline-js": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.17.3",
     "@xmldom/xmldom": "^0.8.11",
     "jszip": "^3.10.1"

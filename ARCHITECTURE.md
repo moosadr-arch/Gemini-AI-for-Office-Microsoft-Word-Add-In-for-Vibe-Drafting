@@ -114,7 +114,16 @@ Defenses against per-model variance and brittleness, roughly outermost to innerm
 7. **Native-API fallback for empty targets** (`insertContentAsNativeParagraphs`) —
    inserting into an empty paragraph or appending at end-of-document uses Word's
    native, natively-tracked insertion instead of OOXML reconciliation, which Word
-   rejects for empty diff targets.
+   rejects for empty diff targets. The fallback pre-renders Markdown per paragraph
+   (for example `# Heading` and `**bold**`) before native insertion so raw model
+   formatting delimiters do not leak into the document. Content is segmented into
+   text/bullet-list/table blocks (`segmentNativeInsertionBlocks`): bullet blocks and
+   Markdown tables are rendered as real Word lists/tables through the reconciliation
+   engine's list/table OOXML generators (redlines baked in, native tracking toggled
+   off for the insertion), while top-level numbered lines stay literal text so
+   explicit section numbering ("3. Exclusions") is never renumbered by
+   restart-at-1 list generation. If OOXML generation or insertion fails, bullet
+   lines degrade to literal `•` text — raw markers never reach the document.
 8. **Auto-checkpoints** (`modules/storage/checkpoint-store.js`) — an IndexedDB snapshot
    is taken before each mutating tool, so any edit is recoverable.
 9. **In-tool corrective retry** (`buildCorrectiveRetryPrompt`) — one extra diff-only

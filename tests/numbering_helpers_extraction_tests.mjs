@@ -6,7 +6,7 @@ import {
     createDynamicNumberingIdState as createDynamicNumberingIdStateStandalone,
     reserveNextNumberingIdPair as reserveNextNumberingIdPairStandalone,
     mergeNumberingXmlBySchemaOrder as mergeNumberingXmlBySchemaOrderStandalone
-} from '@ansonlai/docx-redline-js/index.js';
+} from '@ansonlai/docx-redline-js';
 
 import {
     createDynamicNumberingIdState,

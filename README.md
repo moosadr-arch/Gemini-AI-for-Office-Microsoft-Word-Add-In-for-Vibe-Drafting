@@ -286,11 +286,6 @@ node tests/agentic_tools_table_intent_tests.mjs
 node tests/include_numbering_behavior.mjs
 ```
 
-> Note: a few suites that import `@ansonlai/docx-redline-js/index.js` directly
-> (e.g. `targeting_helpers_extraction_tests.mjs`, `reconciliation_config_exports_tests.mjs`)
-> currently fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` because the installed package no
-> longer exposes that subpath — a pre-existing issue unrelated to the reliability work.
-
 ### AI Eval Harness (Manual — calls the paid Gemini API)
 
 Measures how reliably each model produces a valid, on-target redline change set. This is **not** part of the default test run; it requires a real API key and makes live model calls.

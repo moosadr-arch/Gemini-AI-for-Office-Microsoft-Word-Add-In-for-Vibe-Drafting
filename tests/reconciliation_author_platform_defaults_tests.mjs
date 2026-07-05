@@ -8,7 +8,7 @@ import {
     setPlatform,
     getPlatform,
     applyRedlineToOxml
-} from '@ansonlai/docx-redline-js/index.js';
+} from '@ansonlai/docx-redline-js';
 import { createRevisionMetadata, resetRevisionIdCounter } from '@ansonlai/docx-redline-js/core/types.js';
 import { injectCommentsIntoOoxml, resetRevisionIdCounter as resetCommentRevisionIdCounter } from '@ansonlai/docx-redline-js/services/comment-engine.js';
 import { ReconciliationPipeline } from '@ansonlai/docx-redline-js/pipeline/pipeline.js';

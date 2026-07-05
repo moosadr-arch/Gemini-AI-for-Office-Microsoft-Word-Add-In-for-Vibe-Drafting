@@ -1,5 +1,14 @@
 import { applyWordOperation } from './word-operation-runner.js';
 import { toScopedSharedRedlineOperation } from '@ansonlai/docx-redline-js/orchestration/redline-operation-converter.js';
+import {
+    preprocessMarkdown,
+    ReconciliationPipeline,
+    wrapInDocumentFragment
+} from '@ansonlai/docx-redline-js';
+import {
+    insertOoxmlWithRangeFallback,
+    withNativeTrackingDisabled
+} from './word-ooxml.js';
 
 /**
  * Insert `content` (\n = paragraph break) as native, tracked Word paragraphs.
@@ -9,28 +18,302 @@ import { toScopedSharedRedlineOperation } from '@ansonlai/docx-redline-js/orches
  * package with InvalidArgument). Native insertText/insertParagraph rely on the
  * document's change-tracking mode (already set to trackAll by setChangeTrackingForAi
  * when redlines are enabled), so insertions are tracked automatically and revert
- * cleanly. Plain text only — markdown formatting is not applied here.
+ * cleanly. Markdown is pre-rendered before native insertion so model output like
+ * `# Heading` or `**Defined Term**` does not leak raw delimiters into Word.
  *
+ * Bullet-list and markdown-table blocks cannot be expressed with insertText, so
+ * the content is segmented (see segmentNativeInsertionBlocks) and those blocks
+ * are rendered through the reconciliation engine's list/table OOXML generators
+ * instead, inserted onto a native placeholder paragraph. If OOXML generation or
+ * insertion fails, the block degrades to literal text with `•` markers so raw
+ * markdown never leaks into the document.
+ *
+ * @param {Object} [opts]
  * @param {boolean} [opts.fillAnchor] - replace the anchor paragraph's (empty) text
  *   with the first line, then insert the rest after it. When false, all lines are
  *   inserted after the anchor (append).
+ * @param {string} [opts.author] - redline author for generated list/table OOXML
+ * @param {boolean} [opts.generateRedlines] - bake w:ins redlines into list/table OOXML
+ * @param {boolean} [opts.disableNativeTracking] - toggle Word tracking off during
+ *   OOXML insertion (required when redlines are baked into the OOXML)
+ * @param {Word.ChangeTrackingMode|null} [opts.baseTrackingMode] - preloaded tracking mode
  */
 export async function insertContentAsNativeParagraphs(context, anchorParagraph, content, opts = {}) {
-    const lines = String(content == null ? '' : content).split('\n');
-    if (lines.length === 0) return false;
+    const blocks = segmentNativeInsertionBlocks(content);
+    if (blocks.length === 0) return false;
 
     let anchor = anchorParagraph;
-    let startIdx = 0;
-    if (opts.fillAnchor) {
-        anchorParagraph.insertText(lines[0], 'Replace');
+    let fillAnchorPending = opts.fillAnchor === true;
+
+    for (const block of blocks) {
+        if (block.kind === 'text') {
+            anchor = await insertNativeTextLines(context, anchor, block.lines, fillAnchorPending);
+            fillAnchorPending = false;
+            continue;
+        }
+
+        // List/table block: replace a placeholder paragraph with engine-generated
+        // OOXML. The sentinel paragraph is a stable native proxy to continue
+        // inserting after (paragraph proxies do not survive multi-paragraph
+        // insertOoxml Replace) and doubles as the spacing paragraph after the block.
+        const placeholder = fillAnchorPending ? anchor : anchor.insertParagraph('', 'After');
+        fillAnchorPending = false;
+        const sentinel = placeholder.insertParagraph('', 'After');
         await context.sync();
-        startIdx = 1;
-    }
-    for (let i = startIdx; i < lines.length; i += 1) {
-        anchor = anchor.insertParagraph(lines[i], 'After');
-        await context.sync();
+
+        const blockText = block.lines.join('\n');
+        const wrappedOoxml = block.kind === 'list'
+            ? await buildListBlockFragment(blockText, opts)
+            : buildTableBlockFragment(blockText, opts);
+
+        let inserted = false;
+        if (wrappedOoxml) {
+            try {
+                await withNativeTrackingDisabled(context, async () => {
+                    await insertOoxmlWithRangeFallback(placeholder, wrappedOoxml, 'Replace', context, `NativeInsert/${block.kind}`);
+                }, {
+                    enabled: opts.disableNativeTracking !== false,
+                    baseTrackingMode: opts.baseTrackingMode ?? null,
+                    logPrefix: `NativeInsert/${block.kind}`
+                });
+                inserted = true;
+            } catch (ooxmlError) {
+                console.warn(`[NativeInsert] ${block.kind} OOXML insertion failed; falling back to literal text:`, ooxmlError);
+            }
+        }
+        if (!inserted) {
+            const literalLines = block.kind === 'list'
+                ? block.lines.map(bulletLineToLiteralText)
+                : block.lines;
+            await insertNativeTextLines(context, placeholder, literalLines, true);
+        }
+        anchor = sentinel;
     }
     return true;
+}
+
+const BULLET_LINE_RE = /^\s*[-*+•]\s+/;
+// Nested (indented) numbered/alpha/roman items are allowed to continue a bullet
+// block; nested numbering restarts at 1 by convention so engine generation is safe.
+const INDENTED_MARKER_LINE_RE = /^\s+(?:\d+(?:\.\d+)*[.)]|[A-Za-z][.)]|[ivxlcIVXLC]+[.)])\s+/;
+
+/**
+ * Splits fallback insertion content into text / list / table blocks.
+ *
+ * Only bullet-marker lines start a list block: the engine's generated numbered
+ * lists always restart at 1, so top-level numbered lines ("3. Exclusions") must
+ * stay literal text to preserve the model's explicit numbering.
+ *
+ * A single blank source line immediately after a list/table block is consumed:
+ * the sentinel/spacing paragraph inserted after the block already represents it.
+ *
+ * @param {string} content
+ * @returns {Array<{ kind: 'text'|'list'|'table', lines: string[] }>}
+ */
+export function segmentNativeInsertionBlocks(content) {
+    const lines = String(content == null ? '' : content).split('\n');
+    const blocks = [];
+    const pushTextLine = (line) => {
+        const last = blocks[blocks.length - 1];
+        if (last && last.kind === 'text') {
+            last.lines.push(line);
+        } else {
+            blocks.push({ kind: 'text', lines: [line] });
+        }
+    };
+    const consumeTrailingBlank = (index) => (
+        index < lines.length && lines[index].trim() === '' ? index + 1 : index
+    );
+
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+
+        if (isMarkdownTableStart(lines, i)) {
+            const tableLines = [];
+            while (i < lines.length && /^\s*\|/.test(lines[i])) {
+                tableLines.push(lines[i]);
+                i += 1;
+            }
+            blocks.push({ kind: 'table', lines: tableLines });
+            i = consumeTrailingBlank(i);
+            continue;
+        }
+
+        if (BULLET_LINE_RE.test(line)) {
+            const listLines = [];
+            while (i < lines.length && (BULLET_LINE_RE.test(lines[i]) || INDENTED_MARKER_LINE_RE.test(lines[i]))) {
+                listLines.push(lines[i]);
+                i += 1;
+            }
+            blocks.push({ kind: 'list', lines: listLines });
+            i = consumeTrailingBlank(i);
+            continue;
+        }
+
+        pushTextLine(line);
+        i += 1;
+    }
+
+    return blocks;
+}
+
+function isMarkdownTableStart(lines, index) {
+    return /^\s*\|.*\|\s*$/.test(lines[index] || '')
+        && isMarkdownSeparatorRow(lines[index + 1] || '');
+}
+
+function bulletLineToLiteralText(line) {
+    return String(line || '').replace(/^(\s*)[-*+]\s+/, '$1• ');
+}
+
+async function insertNativeTextLines(context, startParagraph, lines, replaceFirstIntoAnchor) {
+    let anchor = startParagraph;
+    let replacePending = replaceFirstIntoAnchor === true;
+    for (const line of lines) {
+        const prepared = prepareNativeMarkdownParagraph(line);
+        if (replacePending) {
+            anchor.insertText(prepared.text, 'Replace');
+            replacePending = false;
+        } else {
+            anchor = anchor.insertParagraph(prepared.text, 'After');
+        }
+        await context.sync();
+        await applyNativeParagraphFormatting(anchor, prepared, context);
+    }
+    return anchor;
+}
+
+async function buildListBlockFragment(blockText, opts) {
+    try {
+        const pipeline = new ReconciliationPipeline({
+            generateRedlines: opts.generateRedlines !== false,
+            author: opts.author,
+            font: opts.font || null
+        });
+        const result = await pipeline.executeListGeneration(blockText, null, null, '');
+        if (!result?.ooxml || result.isValid === false) {
+            console.warn('[NativeInsert] List generation produced no valid OOXML:', result?.warnings);
+            return null;
+        }
+        return wrapInDocumentFragment(result.ooxml, {
+            includeNumbering: true,
+            numberingXml: result.numberingXml
+        });
+    } catch (listError) {
+        console.warn('[NativeInsert] List OOXML generation failed:', listError);
+        return null;
+    }
+}
+
+function buildTableBlockFragment(blockText, opts) {
+    try {
+        const pipeline = new ReconciliationPipeline({
+            generateRedlines: opts.generateRedlines !== false,
+            author: opts.author
+        });
+        const result = pipeline.executeTableGeneration(blockText);
+        if (!result?.ooxml || result.isValid === false) {
+            console.warn('[NativeInsert] Table generation produced no valid OOXML:', result?.warnings);
+            return null;
+        }
+        return wrapInDocumentFragment(result.ooxml, { includeNumbering: false });
+    } catch (tableError) {
+        console.warn('[NativeInsert] Table OOXML generation failed:', tableError);
+        return null;
+    }
+}
+
+export function prepareNativeMarkdownParagraphs(content) {
+    return String(content == null ? '' : content)
+        .split('\n')
+        .map(prepareNativeMarkdownParagraph);
+}
+
+function prepareNativeMarkdownParagraph(line) {
+    const raw = String(line == null ? '' : line);
+    const headingMatch = raw.match(/^\s{0,3}(#{1,9})\s+(.+?)\s*#*\s*$/);
+    const headingLevel = headingMatch ? Math.min(headingMatch[1].length, 9) : null;
+    const markdownText = headingMatch ? headingMatch[2] : raw;
+    const { cleanText, formatHints } = preprocessMarkdown(markdownText);
+    const hints = Array.isArray(formatHints) ? [...formatHints] : [];
+
+    if (headingLevel && cleanText.trim()) {
+        hints.push({
+            start: 0,
+            end: cleanText.length,
+            format: { bold: true }
+        });
+    }
+
+    return {
+        text: cleanText,
+        formatHints: hints,
+        headingLevel
+    };
+}
+
+async function applyNativeParagraphFormatting(paragraph, prepared, context) {
+    if (!paragraph || !prepared) return;
+
+    if (prepared.headingLevel) {
+        try {
+            paragraph.style = `Heading ${prepared.headingLevel}`;
+        } catch {
+            // Some Word hosts reject style assignment on freshly inserted proxies.
+        }
+        if (paragraph.font) {
+            paragraph.font.bold = true;
+        }
+        await context.sync();
+    }
+
+    await applyNativeFormatHints(paragraph, prepared.text, prepared.formatHints, context);
+}
+
+async function applyNativeFormatHints(paragraph, text, formatHints, context) {
+    if (!paragraph || typeof paragraph.getRange !== 'function') return;
+    if (!Array.isArray(formatHints) || formatHints.length === 0) return;
+
+    const paragraphRange = paragraph.getRange();
+    const usedByText = new Map();
+
+    for (const hint of formatHints) {
+        const hintText = String(text || '').substring(hint.start, hint.end);
+        if (!hintText || hintText.trim().length === 0) continue;
+
+        try {
+            const searchResults = paragraphRange.search(hintText, {
+                matchCase: true,
+                matchWholeWord: false
+            });
+            searchResults.load('items/text');
+            await context.sync();
+
+            const items = Array.isArray(searchResults.items) ? searchResults.items : [];
+            if (items.length === 0) continue;
+
+            const used = usedByText.get(hintText) || 0;
+            const targetRange = items[Math.min(used, items.length - 1)];
+            usedByText.set(hintText, used + 1);
+
+            if (hint.format?.bold) {
+                targetRange.font.bold = true;
+            }
+            if (hint.format?.italic) {
+                targetRange.font.italic = true;
+            }
+            if (hint.format?.underline) {
+                targetRange.font.underline = globalThis.Word?.UnderlineType?.single || 'Single';
+            }
+            if (hint.format?.strikethrough) {
+                targetRange.font.strikeThrough = true;
+            }
+            await context.sync();
+        } catch (formatError) {
+            console.warn(`Could not apply native markdown formatting to "${hintText}":`, formatError);
+        }
+    }
 }
 import { isMarkdownTableText } from '@ansonlai/docx-redline-js/core/paragraph-targeting.js';
 import { isLikelyStructuredTableSourceParagraph } from '@ansonlai/docx-redline-js/core/table-targeting.js';
@@ -522,7 +805,12 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                 }
                 // Append new paragraphs after the last one using native (tracked) APIs.
                 const lastParagraph = paragraphs.items[paragraphCount - 1];
-                await insertContentAsNativeParagraphs(context, lastParagraph, appendContent);
+                await insertContentAsNativeParagraphs(context, lastParagraph, appendContent, {
+                    author: options.author,
+                    generateRedlines: options.generateRedlines,
+                    disableNativeTracking: options.disableNativeTracking,
+                    baseTrackingMode: options.baseTrackingMode ?? null
+                });
                 changesApplied += 1;
                 onInfo(`Appended new content after P${paragraphCount} (end of document).`);
                 continue;
@@ -710,7 +998,13 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                     : null;
                 if (insertContent && insertContent.trim()) {
                     onInfo(`Empty target P${change?.paragraphIndex}: inserting content as a native tracked change.`);
-                    await insertContentAsNativeParagraphs(context, startParagraph, insertContent, { fillAnchor: true });
+                    await insertContentAsNativeParagraphs(context, startParagraph, insertContent, {
+                        fillAnchor: true,
+                        author: options.author,
+                        generateRedlines: options.generateRedlines,
+                        disableNativeTracking: options.disableNativeTracking,
+                        baseTrackingMode: options.baseTrackingMode ?? null
+                    });
                     changesApplied += 1;
                     continue;
                 }

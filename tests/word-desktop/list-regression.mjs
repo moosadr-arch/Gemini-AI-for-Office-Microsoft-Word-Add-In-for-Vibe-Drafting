@@ -12,7 +12,7 @@ import {
     createDynamicNumberingIdState,
     mergeNumberingXmlBySchemaOrder,
     remapNumberingPayloadForDocument
-} from '@ansonlai/docx-redline-js/index.js';
+} from '@ansonlai/docx-redline-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';

@@ -5,7 +5,7 @@ import {
     getDefaultAuthor as getDefaultAuthorCore,
     setPlatform as setPlatformCore,
     getPlatform as getPlatformCore
-} from '@ansonlai/docx-redline-js/index.js';
+} from '@ansonlai/docx-redline-js';
 
 import {
     setDefaultAuthor as setDefaultAuthorWordEntry,

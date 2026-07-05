@@ -7,7 +7,7 @@ import {
     inferTableReplacementParagraphBlock as inferTableReplacementParagraphBlockStandalone,
     isLikelyStructuredTableSourceParagraph as isLikelyStructuredTableSourceParagraphStandalone,
     parseOoxml
-} from '@ansonlai/docx-redline-js/index.js';
+} from '@ansonlai/docx-redline-js';
 
 import {
     resolveParagraphRangeByRefs
