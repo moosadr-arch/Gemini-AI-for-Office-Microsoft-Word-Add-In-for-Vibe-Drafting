@@ -1,5 +1,37 @@
 import { applyWordOperation } from './word-operation-runner.js';
 import { toScopedSharedRedlineOperation } from '@ansonlai/docx-redline-js/orchestration/redline-operation-converter.js';
+
+/**
+ * Insert `content` (\n = paragraph break) as native, tracked Word paragraphs.
+ *
+ * Used for inserting into an empty paragraph or appending at end-of-document —
+ * cases the OOXML reconciliation engine cannot handle (Word rejects the generated
+ * package with InvalidArgument). Native insertText/insertParagraph rely on the
+ * document's change-tracking mode (already set to trackAll by setChangeTrackingForAi
+ * when redlines are enabled), so insertions are tracked automatically and revert
+ * cleanly. Plain text only — markdown formatting is not applied here.
+ *
+ * @param {boolean} [opts.fillAnchor] - replace the anchor paragraph's (empty) text
+ *   with the first line, then insert the rest after it. When false, all lines are
+ *   inserted after the anchor (append).
+ */
+export async function insertContentAsNativeParagraphs(context, anchorParagraph, content, opts = {}) {
+    const lines = String(content == null ? '' : content).split('\n');
+    if (lines.length === 0) return false;
+
+    let anchor = anchorParagraph;
+    let startIdx = 0;
+    if (opts.fillAnchor) {
+        anchorParagraph.insertText(lines[0], 'Replace');
+        await context.sync();
+        startIdx = 1;
+    }
+    for (let i = startIdx; i < lines.length; i += 1) {
+        anchor = anchor.insertParagraph(lines[i], 'After');
+        await context.sync();
+    }
+    return true;
+}
 import { isMarkdownTableText } from '@ansonlai/docx-redline-js/core/paragraph-targeting.js';
 import { isLikelyStructuredTableSourceParagraph } from '@ansonlai/docx-redline-js/core/table-targeting.js';
 
@@ -432,6 +464,14 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
     const requiresTableContent = requestedContentKind === 'table';
 
     let changesApplied = 0;
+    const skipped = [];
+    const recordSkip = (change, operation, reason) => {
+        skipped.push({
+            paragraphIndex: change?.paragraphIndex,
+            operation: operation || String(change?.operation || '').trim().toLowerCase(),
+            reason
+        });
+    };
 
     for (const change of changes) {
         try {
@@ -454,8 +494,37 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
             await context.sync();
 
             const paragraphCount = paragraphs.items.length;
-            if (startIndex >= paragraphCount) {
+
+            // Append-at-end: targeting the paragraph one past the last one with a
+            // content-bearing operation inserts brand-new paragraph(s) after the
+            // document's last paragraph (the only way to add content when there is
+            // no trailing blank paragraph to reuse).
+            const isAppendAtEnd = startIndex === paragraphCount
+                && (operationName === 'replace_paragraph' || operationName === 'replace_range' || operationName === 'edit_paragraph');
+
+            if (startIndex > paragraphCount || (startIndex === paragraphCount && !isAppendAtEnd)) {
                 onWarn(`Out-of-range target P${change?.paragraphIndex} (count=${paragraphCount}); no-op.`);
+                recordSkip(change, operationName, `paragraph P${change?.paragraphIndex} is out of range (document has ${paragraphCount} paragraphs)`);
+                continue;
+            }
+
+            if (isAppendAtEnd) {
+                const appendContent = normalizeReplacementText(getReplacementText(change, operationName));
+                if (!appendContent || !appendContent.trim()) {
+                    onWarn(`Append at P${change?.paragraphIndex}: no content to append; no-op.`);
+                    recordSkip(change, operationName, 'no content was provided to append at the end of the document');
+                    continue;
+                }
+                if (paragraphCount === 0) {
+                    onWarn('Append requested but document has no paragraphs; no-op.');
+                    recordSkip(change, operationName, 'document has no paragraphs to append after');
+                    continue;
+                }
+                // Append new paragraphs after the last one using native (tracked) APIs.
+                const lastParagraph = paragraphs.items[paragraphCount - 1];
+                await insertContentAsNativeParagraphs(context, lastParagraph, appendContent);
+                changesApplied += 1;
+                onInfo(`Appended new content after P${paragraphCount} (end of document).`);
                 continue;
             }
 
@@ -632,7 +701,21 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                 insertionBeforeStart
             });
             if (!converted.ok) {
+                // Empty target paragraph: the OOXML reconciliation engine cannot diff
+                // against empty text (Word rejects its output). Insert the content with
+                // native, tracked Word APIs instead of skipping.
+                const emptyTarget = /target.*empty|empty.*target/i.test(converted.reason || '');
+                const insertContent = emptyTarget
+                    ? normalizeReplacementText(getReplacementText(normalizedChange, operationName))
+                    : null;
+                if (insertContent && insertContent.trim()) {
+                    onInfo(`Empty target P${change?.paragraphIndex}: inserting content as a native tracked change.`);
+                    await insertContentAsNativeParagraphs(context, startParagraph, insertContent, { fillAnchor: true });
+                    changesApplied += 1;
+                    continue;
+                }
                 onWarn(`Skipping change: ${converted.reason}`);
+                recordSkip(change, operationName, emptyTarget ? 'empty paragraph and no content to insert' : converted.reason);
                 continue;
             }
 
@@ -657,12 +740,14 @@ export async function applyRedlineChangesToWordContext(context, aiChanges, optio
                 changesApplied += 1;
             } else {
                 onWarn(`No changes produced for change: ${JSON.stringify(normalizedChange)}`);
+                recordSkip(change, operationName, `no changes were produced for P${change?.paragraphIndex} (the new content may match the existing text)`);
             }
         } catch (changeError) {
             onWarn(`Failed to apply change ${JSON.stringify(change)}: ${changeError?.message || changeError}`);
+            recordSkip(change, undefined, `apply error: ${changeError?.message || changeError}`);
         }
     }
 
     onInfo(`Total changes applied: ${changesApplied}`);
-    return { changesApplied };
+    return { changesApplied, skipped };
 }

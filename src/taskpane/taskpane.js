@@ -26,6 +26,7 @@ import {
   maintainHistoryWindow,
   validateHistoryPairs,
   sanitizeHistory,
+  appendFunctionExchange,
   removeAllFunctionPairs,
   createFreshStartWithContext
 } from './modules/chat/chat-history.js';
@@ -43,6 +44,14 @@ import {
   executeEditSection
 } from './modules/commands/agentic-tools.js';
 import { setPlatform } from '@ansonlai/docx-redline-js';
+import { getModelProfile } from './modules/config/model-profiles.js';
+import {
+  saveCheckpoint,
+  getCheckpoint,
+  importCheckpoints,
+  formatAutoCheckpointLabel,
+  migrateLegacyCheckpoints
+} from './modules/storage/checkpoint-store.js';
 
 // Configure marked for GFM (GitHub Flavored Markdown) with tables, breaks, etc.
 marked.setOptions({
@@ -79,11 +88,12 @@ const DOCUMENT_LIMITS = {
   TOKEN_MULTIPLIER: 1.33     // Words to tokens conversion factor
 };
 
-// Storage quotas
-const STORAGE_LIMITS = {
-  SAFE_LIMIT: 4500000,       // ~4.5MB safe limit for localStorage
-  MIN_PRUNE_COUNT: 5         // Minimum checkpoints to prune when quota exceeded
-};
+// Auto-checkpoint throttle: skip a new auto-snapshot if one was taken very
+// recently (e.g. multiple tools in one turn should not each snapshot).
+const CHECKPOINT_THROTTLE_MS = 15000;
+let lastAutoCheckpointAt = 0;
+let lastAutoCheckpointId = -1;
+let checkpointMigrationDone = false;
 
 // API generation limits
 const API_LIMITS = {
@@ -997,100 +1007,75 @@ async function runGlanceChecks() {
   }
 }
 
-// --- Checkpoint Management ---
+// --- Checkpoint Management (IndexedDB-backed; see modules/storage/checkpoint-store.js) ---
 
-function getCheckpoints() {
-  const checkpointsJson = localStorage.getItem("docCheckpoints");
-  return checkpointsJson ? JSON.parse(checkpointsJson) : [];
+/**
+ * One-time migration of any legacy localStorage checkpoints into IndexedDB.
+ * Runs at most once per session; clears the legacy key afterward.
+ */
+async function ensureCheckpointMigration() {
+  if (checkpointMigrationDone) return;
+  checkpointMigrationDone = true; // set first so a failure doesn't retry every save
+  try {
+    const legacyJson = localStorage.getItem("docCheckpoints");
+    if (!legacyJson) return;
+    const legacy = JSON.parse(legacyJson);
+    const records = migrateLegacyCheckpoints(legacy);
+    if (records.length > 0) {
+      await importCheckpoints(records);
+      console.log(`Migrated ${records.length} checkpoint(s) from localStorage to IndexedDB.`);
+    }
+    localStorage.removeItem("docCheckpoints");
+  } catch (e) {
+    console.warn("Checkpoint migration skipped:", e);
+  }
 }
 
-function saveCheckpoints(checkpoints) {
-  const MAX_RETRIES = 10; // Maximum number of retry attempts
+/**
+ * Capture the current document state as a checkpoint.
+ * @param {boolean} silent - suppress chat status messages
+ * @param {string|null} toolName - when set, this is an auto-checkpoint taken
+ *   before a mutating tool; it is labeled `auto:<toolName>:<ISO>` and throttled.
+ * @returns {Promise<number>} the new checkpoint id (>=1), or -1 on failure/skip
+ */
+async function createCheckpoint(silent = false, toolName = null) {
+  const isAuto = !!toolName;
 
-  let retries = 0;
-  while (retries < MAX_RETRIES) {
-    try {
-      localStorage.setItem("docCheckpoints", JSON.stringify(checkpoints));
-      return true; // Success
-    } catch (error) {
-      if (error.name === 'QuotaExceededError' && checkpoints.length > 1) {
-        // Remove 50% of checkpoints (more aggressive pruning)
-        const toRemove = Math.max(1, Math.floor(checkpoints.length / 2));
-        checkpoints.splice(0, toRemove);
-        console.warn(`QuotaExceededError: Removed ${toRemove} oldest checkpoint(s), ${checkpoints.length} remaining. Retrying...`);
-        retries++;
-      } else if (error.name === 'QuotaExceededError' && checkpoints.length <= 1) {
-        // Can't prune anymore, clear all and give up gracefully
-        console.warn("Storage quota exceeded. Clearing all checkpoints.");
-        try {
-          localStorage.removeItem("docCheckpoints");
-        } catch (e) { /* ignore */ }
-        return false; // Silently fail rather than throw
-      } else {
-        // Not a quota error
-        console.error("Failed to save checkpoints:", error);
-        return false; // Silently fail rather than throw
-      }
-    }
+  // Throttle auto-checkpoints so multi-tool turns don't snapshot repeatedly.
+  // Returning the last auto id keeps per-message revert buttons pointing at a
+  // valid recent pre-edit state.
+  if (isAuto && (Date.now() - lastAutoCheckpointAt) < CHECKPOINT_THROTTLE_MS) {
+    return lastAutoCheckpointId;
   }
 
-  // If we've exhausted retries, fail gracefully
-  console.warn("Unable to save checkpoint after max retries. Clearing checkpoints.");
-  try {
-    localStorage.removeItem("docCheckpoints");
-  } catch (e) { /* ignore */ }
-  return false;
-}
-
-// function updateCheckpointStatus() { ... } removed as UI is gone.
-
-async function createCheckpoint(silent = false) {
   if (!silent) {
     addMessageToChat("System", "Saving checkpoint...");
   }
+
   try {
-    return await Word.run(async (context) => {
+    await ensureCheckpointMigration();
+
+    // 'ooxml.value' is a base64 string of the entire document body.
+    let ooxmlValue = "";
+    await Word.run(async (context) => {
       const ooxml = context.document.body.getOoxml();
       await context.sync();
-
-      // 'ooxml.value' is a base64 string of the entire document body
-      const ooxmlLength = ooxml.value.length;
-      console.log(`Checkpoint OOXML length: ${ooxmlLength}`);
-
-      const checkpoints = getCheckpoints();
-
-      // Check for quota issues roughly (5MB limit usually)
-      let totalSize = 0;
-      checkpoints.forEach(c => totalSize += c.length);
-      console.log(`Current total checkpoints size: ${totalSize}`);
-
-      let prunedCount = 0;
-
-      // Prune at least MIN_PRUNE_COUNT checkpoints if we need to prune any, to create a buffer
-      while ((totalSize + ooxmlLength > STORAGE_LIMITS.SAFE_LIMIT || (prunedCount > 0 && prunedCount < STORAGE_LIMITS.MIN_PRUNE_COUNT)) && checkpoints.length > 0) {
-        const removed = checkpoints.shift(); // Remove oldest
-        totalSize -= removed.length;
-        prunedCount++;
-      }
-
-      if (prunedCount > 0) {
-        console.warn(`LocalStorage quota exceeded. Removed ${prunedCount} oldest checkpoint(s).`);
-        if (!silent) {
-          addMessageToChat("System", `Storage full. Removed ${prunedCount} old checkpoint(s) to make space.`);
-        }
-      }
-
-      checkpoints.push(ooxml.value);
-      saveCheckpoints(checkpoints);
-
-      if (!silent) {
-        addMessageToChat("System", `Checkpoint saved. Total: ${checkpoints.length}`);
-      }
-
-      // Return the index of the newly created checkpoint (0-based)
-      return checkpoints.length - 1;
+      ooxmlValue = ooxml.value;
     });
+
+    const label = isAuto ? formatAutoCheckpointLabel(toolName) : "manual";
+    const id = await saveCheckpoint(label, ooxmlValue);
+
+    if (isAuto) {
+      lastAutoCheckpointAt = Date.now();
+      lastAutoCheckpointId = id;
+    }
+    if (!silent) {
+      addMessageToChat("System", "Checkpoint saved.");
+    }
+    return id;
   } catch (error) {
+    // Never block the edit on a checkpoint failure.
     console.error("Error saving checkpoint:", error);
     if (!silent) {
       addMessageToChat("Error", `Could not save checkpoint. ${error.message}`);
@@ -1099,17 +1084,20 @@ async function createCheckpoint(silent = false) {
   }
 }
 
+async function restoreCheckpoint(id) {
+  let record = null;
+  try {
+    record = await getCheckpoint(id);
+  } catch (e) {
+    console.error("Error loading checkpoint:", e);
+  }
 
-async function restoreCheckpoint(index) {
-  const checkpoints = getCheckpoints();
-  if (index < 0 || index >= checkpoints.length) {
-    addMessageToChat("Error", "Invalid checkpoint index.");
+  if (!record || !record.ooxml) {
+    addMessageToChat("Error", "Invalid or missing checkpoint.");
     return;
   }
 
-  const msgElement = addMessageToChat("System", `Reverting to checkpoint #${index + 1}...`);
-
-  const targetCheckpointOoxml = checkpoints[index];
+  const msgElement = addMessageToChat("System", "Reverting to checkpoint...");
 
   try {
     await Word.run(async (context) => {
@@ -1125,11 +1113,10 @@ async function restoreCheckpoint(index) {
       }
 
       context.document.body.clear(); // Clear the current document body
-      context.document.body.insertOoxml(targetCheckpointOoxml, "Replace");
+      context.document.body.insertOoxml(record.ooxml, "Replace");
       await context.sync();
 
-      // Optionally restore track changes, but reverting usually implies going back to a state.
-      // If we restore it, we might want to do it cleanly.
+      // Restore the original track-changes mode after reverting.
       if (originalMode !== Word.ChangeTrackingMode.off) {
         doc.changeTrackingMode = originalMode;
         await context.sync();
@@ -1178,6 +1165,10 @@ async function sendChatMessage(modelType = 'fast', messageOverride = null) {
   // Set up abort controller for this request (allows user cancellation)
   currentRequestController = new AbortController();
   const requestStartTime = Date.now();
+
+  // Resolve the model profile up front so it is available in both the request
+  // loop and the outer catch block (e.g. for the timeout/throttle message).
+  const modelProfile = getModelProfile(loadModel(modelType));
 
   // Lock UI
   chatInput.disabled = true;
@@ -1631,10 +1622,14 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
         console.warn(`Overall request timeout exceeded: ${elapsedTime}ms`);
         removeMessage(loadingMsg);
 
+        // Only suggest reverting to 2.5 for models flagged as preview/throttled.
+        const throttleWarning = modelProfile.previewThrottleWarning
+          ? "\n\nThis model is in preview and your access has likely been throttled. Please go into settings and revert to Gemini 2.5."
+          : "";
+
         // If some tools executed successfully, show partial success
         if (toolsExecutedInCurrentRequest.length > 0) {
           const successMessage = generateSuccessMessage(toolsExecutedInCurrentRequest);
-          const throttleWarning = "\n\nIf you're using Gemini 3, it is in preview and your access has likely been throttled. Please go into settings and revert to Gemini 2.5.";
 
           if (successMessage) {
             addMessageToChat("System", successMessage + "\n\n*(Request timed out after completing some changes)*" + throttleWarning);
@@ -1643,7 +1638,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
           }
         } else {
           // Specific message for throttle/timeout
-          addMessageToChat("Error", "If you're using Gemini 3, it is in preview and your access has likely been throttled. Please go into settings and revert to Gemini 2.5.");
+          addMessageToChat("Error", "The request timed out." + (throttleWarning || " Please try again."));
 
           // Discard the timed out request from history to allow user to continue clean
           // Remove the last user message we added for this request
@@ -1658,14 +1653,16 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
         break;
       }
 
-      // Prepare payload with current history
+      // Prepare payload with current history. maxOutputTokens comes from the
+      // model profile (defaults preserve the previous API_LIMITS value). The chat
+      // loop intentionally does NOT set a temperature, matching prior behavior.
       const payload = {
         contents: chatHistory,
         systemInstruction: systemInstruction,
         tools: tools,
         safetySettings: SAFETY_SETTINGS_BLOCK_NONE,
         generationConfig: {
-          maxOutputTokens: API_LIMITS.MAX_OUTPUT_TOKENS
+          maxOutputTokens: modelProfile.maxOutputTokens
         },
       };
 
@@ -1673,7 +1670,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
 
       let result;
       try {
-        result = await callGeminiWithRetry(apiUrl, payload);
+        result = await callGeminiWithRetry(apiUrl, payload, modelProfile.retries);
       } catch (apiError) {
         console.error(`API Error on iteration ${loopCount}:`, apiError);
 
@@ -1689,6 +1686,10 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
 
           if (currentRecoveryTier === 1) {
             // Tier 1: Validate and clean history pairs
+            // Reaching here means a function-call/response invariant escaped
+            // appendFunctionExchange (which should make this structurally
+            // impossible). Worth investigating if it shows up in manual testing.
+            console.warn("Tier 1 recovery reached: a history invariant escaped appendFunctionExchange.");
             console.log("Tier 1: Validating history pairs...");
             const originalLength = chatHistory.length;
             chatHistory = validateHistoryPairs(chatHistory);
@@ -2043,7 +2044,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
           let toolSucceeded = false;
 
           if (functionCall.name === "apply_redlines") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             const result = await executeRedline(instruction, docText);
             toolResult = result.message;
             toolSucceeded = !!result.showToUser;
@@ -2064,7 +2065,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
             }
 
           } else if (functionCall.name === "insert_comment") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             const result = await executeComment(instruction, docText);
             toolResult = result.message;
             toolSucceeded = !!result.showToUser;
@@ -2084,7 +2085,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
             }
 
           } else if (functionCall.name === "highlight_text") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             const highlightColor = args.color || "yellow";
             const result = await executeHighlight(instruction, docText, highlightColor);
             toolResult = result.message;
@@ -2133,7 +2134,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
 
             updateSystemMessage(loadingMsg, `Navigated to: "${instruction}"`);
           } else if (functionCall.name === "edit_list") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             updateSystemMessage(loadingMsg, `Editing list from P${args.startParagraphIndex} to P${args.endParagraphIndex}...`);
 
             const result = await executeEditList(
@@ -2160,7 +2161,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
               updateSystemMessage(loadingMsg, toolResult);
             }
           } else if (functionCall.name === "insert_list_item") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             updateSystemMessage(loadingMsg, `Inserting list item after P${args.afterParagraphIndex}...`);
 
             const result = await executeInsertListItem(
@@ -2185,7 +2186,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
               updateSystemMessage(loadingMsg, toolResult);
             }
           } else if (functionCall.name === "edit_table") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             updateSystemMessage(loadingMsg, `Editing table (${args.action})...`);
 
             const result = await executeEditTable(
@@ -2212,7 +2213,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
               updateSystemMessage(loadingMsg, toolResult);
             }
           } else if (functionCall.name === "edit_section") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             updateSystemMessage(loadingMsg, `Editing section at P${args.sectionHeaderIndex}...`);
 
             const result = await executeEditSection(
@@ -2238,7 +2239,7 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
               updateSystemMessage(loadingMsg, toolResult);
             }
           } else if (functionCall.name === "convert_headers_to_list") {
-            const checkpointIndex = await createCheckpoint(true);
+            const checkpointIndex = await createCheckpoint(true, functionCall.name);
             updateSystemMessage(loadingMsg, `Converting ${args.paragraphIndices?.length || 0} headers to numbered list...`);
 
             const result = await executeConvertHeadersToList(
@@ -2311,17 +2312,15 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
           });
         }
 
-        // NOW add both the model's function call and the responses to history together
-        // This ensures they're added as a complete pair
-        chatHistory.push({
-          role: "model",
-          parts: parts
-        });
-
-        chatHistory.push({
-          role: "user",
-          parts: functionResponses
-        });
+        // NOW add both the model's function call and the responses to history
+        // together, validating the pair atomically so a mismatched exchange can
+        // never enter history (the condition the tier recovery ladder cleans up
+        // after the fact). On mismatch this throws to the outer catch.
+        appendFunctionExchange(
+          chatHistory,
+          { role: "model", parts: parts },
+          { role: "user", parts: functionResponses }
+        );
 
         if (attemptedMutatingToolsThisLoop > 0 && successfulMutatingToolsThisLoop === 0) {
           const noProgressSignature = failedMutationSignatures.join("||").slice(0, 2000);
@@ -2398,9 +2397,12 @@ CRITICAL: Do NOT use internal paragraph markers (like [P#] or P#) or internal ID
 
       let errorMessage = error.message ? `Sorry, I couldn't get a response. Error: ${error.message}` : `Sorry, I couldn't get a response. Error: ${String(error)}`;
 
-      // Override error message for timeouts
+      // Override error message for timeouts. Only suggest reverting to 2.5 for
+      // models flagged as preview/throttled.
       if (error.message && (error.message.includes("timed out") || error.message.includes("timeout"))) {
-        errorMessage = "Gemini 3 is in preview and they have likely been throttled. Please go into settings and revert to Gemini 2.5.";
+        errorMessage = modelProfile.previewThrottleWarning
+          ? "This model is in preview and has likely been throttled. Please go into settings and revert to Gemini 2.5."
+          : "The request timed out. The AI is taking longer than usual. Please try again.";
       }
 
       const errorMsgEl = addMessageToChat("Error", errorMessage);

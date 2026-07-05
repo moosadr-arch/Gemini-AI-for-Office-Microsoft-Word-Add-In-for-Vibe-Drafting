@@ -19,6 +19,21 @@ import {
 import {
   resolveInsertListItemLevel
 } from './list-level-utils.js';
+import {
+  parseAnchoredParagraphs,
+  verifyAnchor,
+  sanitizeChangeSet,
+  formatRejections,
+  repairTruncatedJsonArray
+} from './change-validation.js';
+import {
+  getModelProfile
+} from '../config/model-profiles.js';
+import {
+  buildRedlineDiffPrompt,
+  buildCorrectiveRetryPrompt,
+  REDLINE_DIFF_SCHEMA
+} from './redline-prompt.js';
 
 let loadApiKey;
 let loadModel;
@@ -65,19 +80,57 @@ export function detectRequestedContentKind(instruction) {
   return null;
 }
 
-async function applyRedlineChangeSet(aiChanges, instruction = '') {
+async function applyRedlineChangeSet(aiChanges, instruction = '', paragraphTexts = null) {
   const redlineEnabled = loadRedlineSetting();
   const redlineAuthor = loadRedlineAuthor();
   let changesApplied = 0;
   const requestedContentKind = detectRequestedContentKind(instruction);
 
+  // WP1: Verify content anchors before applying. Reject changes whose anchorText
+  // does not match the targeted paragraph; auto-correct unambiguous off-by-one
+  // indexes (and shift endParagraphIndex by the same offset for replace_range).
+  let changesToApply = aiChanges;
+  const rejectedChanges = [];
+  if (Array.isArray(paragraphTexts) && paragraphTexts.length > 0 && Array.isArray(aiChanges)) {
+    changesToApply = [];
+    for (const original of aiChanges) {
+      const verdict = verifyAnchor(original, paragraphTexts);
+      if (!verdict.ok) {
+        rejectedChanges.push({
+          paragraphIndex: original ? original.paragraphIndex : undefined,
+          operation: original ? original.operation : undefined,
+          anchorText: original ? original.anchorText : undefined,
+          reason: verdict.reason,
+          actualTextSnippet: verdict.actualTextSnippet
+        });
+        continue;
+      }
+
+      let change = original;
+      if (typeof verdict.correctedIndex === 'number') {
+        const offset = verdict.correctedIndex - original.paragraphIndex;
+        change = { ...original, paragraphIndex: verdict.correctedIndex };
+        if (typeof change.endParagraphIndex === 'number') {
+          change.endParagraphIndex = change.endParagraphIndex + offset;
+        }
+        console.log(`Redline anchor: corrected P${original.paragraphIndex} -> P${verdict.correctedIndex}`);
+      }
+      changesToApply.push(change);
+    }
+  }
+
+  if (Array.isArray(changesToApply) && changesToApply.length === 0) {
+    return { changesApplied: 0, redlineEnabled, rejectedChanges, engineSkipped: [] };
+  }
+
+  let engineSkipped = [];
   await Word.run(async (context) => {
     const trackingState = await setChangeTrackingForAi(context, redlineEnabled, "executeRedline");
     try {
       context.document.load("changeTrackingMode");
       await context.sync();
       const baseTrackingMode = context.document.changeTrackingMode;
-      const result = await applyRedlineChangesToWordContext(context, aiChanges, {
+      const result = await applyRedlineChangesToWordContext(context, changesToApply, {
         author: redlineAuthor,
         generateRedlines: redlineEnabled,
         disableNativeTracking: redlineEnabled,
@@ -86,6 +139,7 @@ async function applyRedlineChangeSet(aiChanges, instruction = '') {
         requestedContentKind
       });
       changesApplied = result.changesApplied;
+      engineSkipped = Array.isArray(result.skipped) ? result.skipped : [];
     } finally {
       await restoreChangeTracking(context, trackingState, "executeRedline");
     }
@@ -93,7 +147,9 @@ async function applyRedlineChangeSet(aiChanges, instruction = '') {
 
   return {
     changesApplied,
-    redlineEnabled
+    redlineEnabled,
+    rejectedChanges,
+    engineSkipped
   };
 }
 
@@ -111,114 +167,82 @@ async function executeRedline(instruction, fullDocumentText) {
     // Detect document font for consistent HTML insertion
     await detectDocumentFont();
 
-    // 1. Build the prompt for the diff generator
-    const fullPrompt = `You are an expert legal editor. Review the document content (provided with [P#] anchors) based on the user's instruction.
-Generate a JSON array of precise changes to be made, referencing the paragraph numbers.
+    // 1. Build the prompt for the diff generator (shared with the eval harness)
+    const fullPrompt = buildRedlineDiffPrompt(instruction, fullDocumentText);
+    const paragraphTexts = parseAnchoredParagraphs(fullDocumentText);
 
-CRITICAL: Return ONLY valid JSON. Do NOT include explanatory text, notes, or duplicate entries.
+    // Up to 2 attempts: if the first change set is rejected in full (nothing
+    // applied, so the document is untouched), re-ask the diff generator ONCE
+    // with its own invalid output + the rejection reasons. This fixes malformed
+    // change sets (e.g. a thinking model leaving "content" empty and leaking
+    // notes into unused fields) without bouncing back to the chat model, which
+    // would burn a loop-guard strike on an uninformed retry.
+    const MAX_DIFF_ATTEMPTS = 2;
+    let lastFailureMessage = null;
 
-Each change must be an object with the following structure:
-- "paragraphIndex": The integer number of the paragraph to modify (e.g., 1 for [P1]). For "replace_range", this is the START paragraph.
-- "endParagraphIndex": (Only for "replace_range") The integer number of the END paragraph (inclusive).
-- "operation": "edit_paragraph", "replace_paragraph", "modify_text", or "replace_range".
-- "newContent": (For "edit_paragraph" ONLY) The complete rewritten paragraph content. The system will automatically compute precise word-level changes.
-- "content": (REQUIRED for "replace_paragraph" and "replace_range" ONLY) The new content to insert.
-- "originalText": (For "modify_text" ONLY) The specific text snippet within the paragraph to find and replace. **MAX 80 characters**.
-- "replacementText": (For "modify_text" ONLY) The new text to replace "originalText" with.
+    for (let attempt = 1; attempt <= MAX_DIFF_ATTEMPTS; attempt++) {
+      const prompt = attempt === 1 || !lastFailureMessage
+        ? fullPrompt
+        : buildCorrectiveRetryPrompt(fullPrompt, lastFailureMessage.rawChanges, lastFailureMessage.rejectionDetail);
 
-**MARKDOWN FORMATTING (VERY IMPORTANT)**:
-All content and replacementText values support Markdown formatting. Use these when the user requests formatting:
-- **Bold**: Use **text** (double asterisks)
-- *Italic*: Use *text* (single asterisks)
-- **Underline**: Use ++text++ (double pluses)
-- ~~Strikethrough~~: Use ~~text~~ (double tildes)
-- ***Bold Italic***: Use ***text*** (triple asterisks)
-- **Unordered/Bullet lists**: Use "- item" or "* item" on separate lines. These render as bullet points (•).
-- **Ordered/Numbered lists**: Use "1. item", "2. item" on separate lines. These render as 1, 2, 3...
-- **Alphabetical lists (A, B, C)**: Use "A. item", "B. item" on separate lines. Use lowercase "a. item" for a, b, c. Use "I.", "II." for roman numerals.
-- Line breaks: Use actual newlines (\\n) in the text
-- Tables: Use GitHub-style markdown tables:
-  | Header 1 | Header 2 |
-  |----------|----------|
-  | Cell 1   | Cell 2   |
-- Headings: Use # for H1, ## for H2, ### for H3
+      // 2. Call Gemini to get the JSON array of changes
+      const aiChanges = await callGeminiForDiffs(prompt);
 
-**CRITICAL LIST FORMATTING RULES**:
-- **PRESERVE HIERARCHY**: If the document uses nested numbering (1.1, 1.1.1, etc.), ALWAYS use that same hierarchical format in your changes. **Do NOT flatten nested lists** into simple numbered lists (1., 2., 3.) unless specifically asked to restructure the hierarchy.
-- **INCLUDE MARKERS**: Always include the correct list marker (e.g., "1.1.1 ") at the start of your \`newContent\` or \`content\` for list items. The system will use these to correctly set the indentation level in Word, and then it will automatically strip them from the final text.
-- **NO MIXING**: NEVER mix bullet markers with manual numbering like "• (a)" or "- 1." - this creates malformed output
-- **MARKDOWN SYNTAX**: 
-  - For bullets: use "- " or "* "
-  - For simple numbers: use "1. ", "2. "
-  - For hierarchical numbers: use "1.1. ", "1.1.1. "
-- **STRIPPING**: When converting existing lists, REMOVE the original markers from your response and use ONLY the markdown syntax described above.
+      console.log(`AI Suggested Changes (raw, attempt ${attempt}):`, aiChanges);
 
-When the user asks for formatted content (bullets, tables, bold, etc.), ALWAYS use the appropriate Markdown syntax.
+      if (!aiChanges || !Array.isArray(aiChanges)) {
+        lastFailureMessage = {
+          rawChanges: aiChanges,
+          rejectionDetail: 'The response was not a JSON array.',
+          message: "TOOL_FAILURE invalid_response: The diff generator did not return a JSON array. Retry with a simpler instruction or use edit_paragraph operations only."
+        };
+        continue;
+      }
 
-Rules:
-- **PRIORITIZE \`edit_paragraph\`**: This is the NEW preferred method. For ANY text edit (small or large), use \`edit_paragraph\` with the complete rewritten paragraph. The system will automatically compute precise word-level changes using diff-match-patch. This is more reliable than \`modify_text\`.
-- Use "edit_paragraph" for ALL text edits: spelling changes, word replacements, sentence rewrites, or even 60% paragraph rewrites. Just provide the full new paragraph content.
-- Use "replace_paragraph" only when you need to replace with complex formatted content (lists, tables, headings) that requires HTML insertion.
-- If converting text into a Markdown table:
-  - Use "replace_paragraph" when it is a single paragraph.
-  - Use "replace_range" when it spans multiple consecutive paragraphs.
-  - For consecutive source paragraphs, ALWAYS include "endParagraphIndex" covering the entire source block being replaced.
-  - Do NOT use "modify_text" for table conversions.
-  - The "content" value MUST be a complete multiline Markdown table with a header row, separator row, and data rows.
-  - NEVER return a single pipe-delimited line such as "A|B|C"; that is plain text, not a table.
-  - Example valid table content: "| Column A | Column B |\\n|---|---|\\n| Value A | Value B |"
-  - For multi-line source blocks, use additional table rows instead of HTML tags inside cells.
-  - Example for turning party paragraphs into a two-column table:
-    [{"paragraphIndex":4,"endParagraphIndex":6,"operation":"replace_range","content":"| Disclosing Party | Receiving Party |\\n|---|---|\\n| [Name of Disclosing Party] | [Name of Receiving Party] |\\n| [Address of Disclosing Party] | [Address of Receiving Party] |"}]
-- Use "modify_text" ONLY as a fallback for very specific surgical edits where you need to target exact substrings.
-- Never use "modify_text" when the replacement includes line breaks, list markers, headings, or Markdown tables.
-- **CRITICAL LENGTH LIMIT**: For "modify_text", "originalText" MUST be **80 characters or fewer**. This is a hard limit.
-- Use "replace_range" when you need to replace multiple consecutive paragraphs (like converting a bulleted list to a single paragraph).
-- For "replace_range", provide ONLY "paragraphIndex", "endParagraphIndex", "operation", and "content". Do NOT include "originalText" or "replacementText".
-- A "replace_range" or "replace_paragraph" without a non-empty "content" field is INVALID. If you cannot determine the replacement content, return [].
-- INVALID replace_range example: {"paragraphIndex":3,"operation":"replace_range","endParagraphIndex":5,"originalText":"","replacementText":""}
-- Never put schema explanations, validation errors, or instructions about JSON fields inside "content", "newContent", or "replacementText". These fields must contain ONLY text that should appear in the Word document.
-- For "edit_paragraph", provide ONLY "paragraphIndex", "operation", and "newContent".
-- For "modify_text", "originalText" must match EXACTLY text found within that specific paragraph.
-- Do NOT include the [P#] marker in any content fields.
-- Return ONLY ONE change per unique text location. Do NOT create duplicate entries.
+      if (aiChanges.length === 0) {
+        // On attempt 1 this means "no edit needed" — a legitimate outcome, not a
+        // failure. On the corrective attempt it means the model gave up.
+        return {
+          message: attempt === 1
+            ? "AI had no changes to suggest based on the instruction."
+            : `TOOL_FAILURE no_changes_applied: the corrected attempt returned no changes. Original problems:\n${lastFailureMessage?.rejectionDetail || 'unknown'}`,
+          showToUser: false
+        };
+      }
 
-IMPORTANT: This document may contain existing tracked changes. The text shown represents the "accepted" state (as if all changes were accepted). Your changes will be applied as additional tracked changes on top of existing ones.
+      // WP2: mechanically sanitize the change set (enforce prompt rules in code)
+      // before WP1 anchor verification + application.
+      const { changes: sanitizedChanges, rejected: sanitizeRejected } =
+        sanitizeChangeSet(aiChanges, paragraphTexts.length);
 
-USER INSTRUCTION:
-"${instruction}"
+      const { changesApplied, redlineEnabled, rejectedChanges: anchorRejected, engineSkipped } =
+        await applyRedlineChangeSet(sanitizedChanges, instruction, paragraphTexts);
 
-DOCUMENT CONTENT:
-"""${fullDocumentText}"""
-
-Return ONLY the JSON array, nothing else:`;
-
-    // 2. Call Gemini to get the JSON array of changes
-    const aiChanges = await callGeminiForDiffs(fullPrompt);
-
-    console.log("AI Suggested Changes (raw):", aiChanges);
-
-    if (!aiChanges || !Array.isArray(aiChanges)) {
-      return {
-        message: "AI did not return a valid list of changes. Please check the console logs for details.",
-        showToUser: false  // Silent error - let the model handle it
-      };
-    }
-
-    if (aiChanges.length === 0) {
-      return {
-        message: "AI had no changes to suggest based on the instruction.",
-        showToUser: false  // Silent - let the model try again or respond
-      };
-    }
-
-    {
-      const { changesApplied, redlineEnabled } = await applyRedlineChangeSet(aiChanges, instruction);
+      // Merge validation rejections (WP1/WP2) with reasons the apply engine
+      // reported for changes it could not apply (e.g. empty target paragraph),
+      // so the model gets a concrete reason rather than retrying blindly.
+      const allRejected = [...sanitizeRejected, ...anchorRejected, ...(engineSkipped || [])];
+      const rejectionDetail = formatRejections(allRejected);
 
       if (changesApplied === 0) {
+        lastFailureMessage = {
+          rawChanges: aiChanges,
+          rejectionDetail: rejectionDetail || 'No changes could be mapped to the document content.',
+          message: rejectionDetail
+            ? `TOOL_FAILURE no_changes_applied: ${allRejected.length} change(s) could not be applied.\n${rejectionDetail}\nDo NOT retry the same change. Re-read the document content and target different paragraph(s), fixing the specific issues above.`
+            : "Applied 0 edits. The AI's suggestions could not be mapped to the document content."
+        };
+        if (attempt < MAX_DIFF_ATTEMPTS) {
+          console.warn(`Redline attempt ${attempt} applied 0 changes; retrying diff generation with corrective feedback.`);
+        }
+        continue;
+      }
+
+      if (rejectionDetail) {
+        const proposed = changesApplied + allRejected.length;
         return {
-          message: "Applied 0 edits. The AI's suggestions could not be mapped to the document content.",
-          showToUser: false
+          message: `Applied ${changesApplied} of ${proposed} edits${redlineEnabled ? ' with redlines' : ' without redlines'}. ${allRejected.length} rejected:\n${rejectionDetail}`,
+          showToUser: true
         };
       }
 
@@ -228,6 +252,12 @@ Return ONLY the JSON array, nothing else:`;
       };
     }
 
+    // Both attempts failed; report the last (most informed) failure to the model.
+    return {
+      message: lastFailureMessage.message,
+      showToUser: false
+    };
+
   } catch (error) {
     console.error("Error in executeRedline:", error);
     return {
@@ -236,32 +266,19 @@ Return ONLY the JSON array, nothing else:`;
     };
   }
 }
+// Hard ceiling for a single diff-generation call. Bounds the damage of model
+// repetition loops: a degenerate generation stops burning tokens/time quickly
+// instead of grinding to the chat-level 48k budget while the UI hangs.
+const DIFF_CALL_TIMEOUT_MS = 90000;
+
 // Helper for the Diff generation (specialized prompt)
 async function callGeminiForDiffs(prompt) {
   const geminiApiKey = loadApiKey();
   const geminiModel = loadModel();
+  const modelProfile = getModelProfile(geminiModel);
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
 
-  const jsonSchema = {
-    type: "ARRAY",
-    items: {
-      type: "OBJECT",
-      properties: {
-        "paragraphIndex": { "type": "INTEGER", "description": "The paragraph number (1-based)" },
-        "endParagraphIndex": { "type": "INTEGER", "description": "Only for replace_range: the end paragraph number (inclusive). Required when converting multiple paragraphs into a table." },
-        "operation": {
-          "type": "STRING",
-          "enum": ["edit_paragraph", "replace_paragraph", "modify_text", "replace_range"],
-          "description": "The type of operation to perform"
-        },
-        "newContent": { "type": "STRING", "description": "For edit_paragraph only: the complete rewritten paragraph content" },
-        "content": { "type": "STRING", "description": "Required for replace_paragraph and replace_range: the new content. For tables, use a complete multiline GitHub Markdown table with header, separator, and data rows. Do not use replacementText for these operations." },
-        "originalText": { "type": "STRING", "description": "For modify_text only: the text to find (max 80 chars). Split larger edits into multiple operations." },
-        "replacementText": { "type": "STRING", "description": "For modify_text only: the replacement text" }
-      },
-      required: ["paragraphIndex", "operation"]
-    }
-  };
+  const jsonSchema = REDLINE_DIFF_SCHEMA;
 
   const systemInstruction = {
     parts: [
@@ -276,18 +293,22 @@ async function callGeminiForDiffs(prompt) {
     systemInstruction: systemInstruction,
     safetySettings: SAFETY_SETTINGS_BLOCK_NONE,
     generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: API_LIMITS.MAX_OUTPUT_TOKENS,
+      temperature: modelProfile.temperature,
+      maxOutputTokens: modelProfile.diffMaxOutputTokens || modelProfile.maxOutputTokens,
       responseMimeType: "application/json",
       responseSchema: jsonSchema,
     },
   };
+
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), DIFF_CALL_TIMEOUT_MS);
 
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: abortController.signal,
     });
 
     if (!response.ok) {
@@ -317,10 +338,25 @@ async function callGeminiForDiffs(prompt) {
 
     const jsonText = textPart.text;
     console.log("Gemini diff JSON text:", jsonText);
-    return JSON.parse(jsonText);
+
+    // Salvage the complete leading objects when the JSON was truncated (e.g. a
+    // repetition loop hit maxOutputTokens mid-string). The sanitizer's dedupe
+    // then collapses repeated objects, so a degenerate response still yields an
+    // actionable change set / rejection reasons instead of a hard parse failure.
+    const { changes, repaired } = repairTruncatedJsonArray(jsonText);
+    if (repaired) {
+      console.warn(`Gemini diff JSON was truncated; salvaged ${changes.length} complete change object(s).`);
+    }
+    return changes;
   } catch (error) {
-    console.error("Error getting diffs:", error);
+    if (error?.name === 'AbortError') {
+      console.error(`Diff generation timed out after ${DIFF_CALL_TIMEOUT_MS / 1000}s (likely a model repetition loop).`);
+    } else {
+      console.error("Error getting diffs:", error);
+    }
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 /**
@@ -937,7 +973,10 @@ async function executeInsertListItem(afterParagraphIndex, text, indentLevel = 0)
  */
 async function executeEditList(startIndex, endIndex, newItems, listType, numberingStyle) {
   if (!newItems || newItems.length === 0) {
-    return { success: false, message: "No list items provided." };
+    return {
+      success: false,
+      message: `TOOL_FAILURE edit_list: No list items were provided for P${startIndex}-P${endIndex}. Supply the "newItems" array with the list content.`
+    };
   }
 
   console.log(`\n\n========== 📋 EXECUTE_EDIT_LIST CALLED ==========`);
@@ -1109,7 +1148,7 @@ async function executeEditList(startIndex, endIndex, newItems, listType, numberi
     console.error("Error in executeEditList:", error);
     return {
       success: false,
-      message: `Failed to edit list: ${error.message}`
+      message: `TOOL_FAILURE edit_list at P${startIndex}-P${endIndex}: ${error.message}`
     };
   }
 }
@@ -1499,7 +1538,7 @@ async function executeEditTable(paragraphIndex, action, content, targetRow, targ
     console.error("Error in executeEditTable:", error);
     return {
       success: false,
-      message: `Failed to edit table: ${error.message}`
+      message: `TOOL_FAILURE edit_table at P${paragraphIndex} (${action}): ${error.message}`
     };
   }
 }

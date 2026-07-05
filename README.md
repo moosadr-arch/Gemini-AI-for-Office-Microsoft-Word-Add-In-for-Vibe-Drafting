@@ -133,16 +133,15 @@ Follow these steps if you want to modify the code or run it locally.
 
 ### Managing Checkpoints
 
-**Save a Checkpoint:**
-- Click "Save Checkpoint" to save the current document state
-- Checkpoints are stored in browser localStorage
+The add-in automatically saves a checkpoint of the document **before each AI edit**, so you can roll back any change.
 
-**Revert to Last Checkpoint:**
-- Click "Revert Last" to restore the previous checkpoint
-- The checkpoint is removed from the stack after reverting
+**How checkpoints work:**
+- A checkpoint is captured automatically before every document-mutating tool runs (with a short throttle so a single multi-edit turn doesn't snapshot repeatedly).
+- Checkpoints are stored in the browser's **IndexedDB** (not localStorage), so they are not limited by the ~5MB localStorage quota and can hold large documents.
+- The most recent 10 checkpoints are kept; older ones are evicted automatically.
 
-**Clear All Checkpoints:**
-- Click "Clear All" to delete all saved checkpoints
+**Revert a change:**
+- Click the **Revert** button attached to an AI edit message to restore the document to the state just before that edit.
 
 ## Best Practices & Personas
 
@@ -190,18 +189,35 @@ Get the most out of Gemini AI by tailoring it to your specific needs. Here are s
 AIWordPlugin/
 ├── src/
 │   ├── taskpane/
-│   │   ├── taskpane.html      # Main UI
-│   │   ├── taskpane.js        # Core functionality
-│   │   ├── taskpane.css       # Styling
+│   │   ├── taskpane.html              # Main UI
+│   │   ├── taskpane.js                # Chat loop, Gemini calls, checkpoints, tool dispatch
+│   │   ├── taskpane.css               # Styling
+│   │   └── modules/
+│   │       ├── commands/              # Agentic tools (agentic-tools.js), redline prompt,
+│   │       │                          #   change validation (anchor + sanitizer)
+│   │       ├── chat/                  # Chat UI + history invariants (appendFunctionExchange)
+│   │       ├── config/                # Per-model profiles (model-profiles.js)
+│   │       ├── storage/               # IndexedDB checkpoint store
+│   │       ├── context/               # Document context extraction
+│   │       ├── glance/                # "Glance" automated checks
+│   │       ├── ui/                    # UI helpers
+│   │       ├── utils/                 # Markdown/font helpers
+│   │       └── docx-redline-js-integration/  # Word-API bridge to @ansonlai/docx-redline-js
 │   └── commands/
 │       ├── commands.html
 │       └── commands.js
-├── assets/                     # Icons
-├── manifest.xml               # Add-in manifest
+├── browser-demo/                      # Browser runtime for manual validation
+├── mcp/docx-server/                   # MCP server exposing reconciliation tools
+├── tests/                             # Node regression tests (*.mjs) + evals/ harness
+├── plans/                             # Implementation plans
+├── assets/                            # Icons
+├── manifest.xml                       # Add-in manifest
 ├── package.json
 ├── webpack.config.js
 └── README.md
 ```
+
+> The document reconciliation engine lives in the external [`@ansonlai/docx-redline-js`](https://www.npmjs.com/package/@ansonlai/docx-redline-js) package; the add-in talks to it through the `docx-redline-js-integration/` bridge. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full system map.
 
 ## Development
 
@@ -242,50 +258,66 @@ npm run docx:harness -- -Action query -InputPath "tests/Sample NDA.docx" -Part "
 
 See `tests/docx-harness/README.md` for full usage.
 
-### Standalone Docx Plumbing Regression
+### Regression Tests
 
-To verify shared standalone package plumbing behavior (OOXML output extraction, numbering/comments artifact wiring, and package validation):
-
-```bash
-node tests/standalone_docx_plumbing_tests.mjs
-```
-
-### Standalone Operation Runner Regression
-
-To verify shared standalone operation routing/application (`redline`, `highlight`, `comment`) against full document XML:
+Tests live in `tests/` as `.mjs` files and run directly with Node (no Word required):
 
 ```bash
-node tests/standalone_operation_runner_tests.mjs
+node tests/<name>.mjs
 ```
 
-This suite includes coverage for explicit range list edits (`targetRef` + `targetEndRef`) to ensure insertion-only requests are applied surgically (single inserted revision, no delete rewrite of untouched list items) while preserving existing list `numId` binding.
-
-### Word Adapter Regression
-
-To verify the Word integration adapter that applies shared standalone operations to paragraph/range scopes:
+**Reliability suites** (model-variance hardening):
 
 ```bash
-node tests/word_operation_runner_adapter_tests.mjs
+node tests/change_validation_tests.mjs        # anchor verification + change-set sanitizer
+node tests/model_profiles_tests.mjs           # per-model profile resolution
+node tests/chat_history_invariant_tests.mjs   # function-call/response history invariants
+node tests/checkpoint_store_tests.mjs         # IndexedDB checkpoint store (pure helpers)
+node tests/redline_prompt_tests.mjs           # shared redline prompt/schema integrity
 ```
 
-To verify migrated command tools remain on shared-engine cutover paths (no legacy fallback routing):
+**Engine / integration suites:**
 
 ```bash
-node tests/migrated_tool_cutover_tests.mjs
+node tests/word_redline_runner_table_normalization_tests.mjs
+node tests/insert_list_item_level_tests.mjs
+node tests/word_list_binding_regression_tests.mjs
+node tests/agentic_tools_table_intent_tests.mjs
+node tests/include_numbering_behavior.mjs
 ```
 
-The add-in uses Google Gemini models (e.g., `gemini-1.5-flash`, `gemini-1.5-pro`). You can modify the default models in [`taskpane.js`](src/taskpane/taskpane.js).
+> Note: a few suites that import `@ansonlai/docx-redline-js/index.js` directly
+> (e.g. `targeting_helpers_extraction_tests.mjs`, `reconciliation_config_exports_tests.mjs`)
+> currently fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` because the installed package no
+> longer exposes that subpath — a pre-existing issue unrelated to the reliability work.
+
+### AI Eval Harness (Manual — calls the paid Gemini API)
+
+Measures how reliably each model produces a valid, on-target redline change set. This is **not** part of the default test run; it requires a real API key and makes live model calls.
+
+```bash
+GEMINI_API_KEY=... node tests/evals/run-evals.mjs --model gemini-2.5-pro --model gemini-flash-latest
+```
+
+- `--model <name>` (repeatable) selects which models to evaluate; `--case <name>` (repeatable) limits to specific cases.
+- Cases live in `tests/evals/cases/*.json`. Each loads a fixture `.docx`, runs the production prompt/schema through the model, then scores the returned change set through the same validation pipeline used in the add-in (sanitizer + anchor verification). It prints a per-model pass/fail table and exits non-zero if any case fails.
+- The prompt and schema are shared with the add-in via [`src/taskpane/modules/commands/redline-prompt.js`](src/taskpane/modules/commands/redline-prompt.js); `node tests/redline_prompt_tests.mjs` guards that the prompt text stays intact.
+
+The add-in uses Google Gemini models. Users pick the **fast** and **think** (slow) models in Settings; the selection is saved per type. When nothing is selected, [`taskpane.js`](src/taskpane/taskpane.js) falls back to `gemini-flash-latest` (fast) and `gemini-2.5-pro` (slow):
 
 ```javascript
-// In taskpane.js, the loadModel function determines which model to use:
+// In taskpane.js, loadModel returns the user's saved choice or a default:
 function loadModel(type = 'fast') {
-  // ...
-  return type === 'slow' ? "gemini-1.5-pro" : "gemini-1.5-flash";
+  const key = type === 'slow' ? "geminiModelSlow" : "geminiModelFast";
+  const storedModel = localStorage.getItem(key);
+  if (storedModel && storedModel.trim() !== "") {
+    return storedModel;
+  }
+  return type === 'slow' ? "gemini-2.5-pro" : "gemini-flash-latest";
 }
-
-const geminiModel = loadModel(modelType);
-const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiApiKey}`;
 ```
+
+Per-model behavior (token limits, temperature, retries, preview-throttle warnings) is centralized in [`src/taskpane/modules/config/model-profiles.js`](src/taskpane/modules/config/model-profiles.js); add a profile there when introducing a new model.
 
 ## Security Notes
 
@@ -315,9 +347,9 @@ const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${gemini
 - Check that the document isn't protected
 
 ### Checkpoints not saving
-- Check browser localStorage isn't full
 - Ensure you have a valid document open
-- Try clearing old checkpoints
+- Checkpoints are stored in the browser's IndexedDB; make sure it isn't disabled (e.g. some private-browsing modes) or out of disk space
+- A failed checkpoint never blocks the edit — check the browser console for a "Could not save checkpoint" warning
 
 ## Future Enhancements
 

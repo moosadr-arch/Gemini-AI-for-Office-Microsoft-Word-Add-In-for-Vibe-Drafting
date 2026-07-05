@@ -210,6 +210,81 @@ function sanitizeHistory(history) {
 }
 
 /**
+ * Append a model functionCall turn and its functionResponse turn atomically,
+ * validating that the pair is well-formed BEFORE either turn enters history.
+ *
+ * This makes it structurally impossible to push a mismatched
+ * function-call/response pair into history (the condition the tier recovery
+ * ladder exists to clean up after the fact). On any mismatch it throws and
+ * leaves `history` untouched; the caller's existing catch paths handle it, and
+ * the repair ladder remains as a net.
+ *
+ * Non-functionCall parts in the model turn (e.g. text/thought parts) are allowed
+ * and ignored — only functionCall/functionResponse counts are enforced.
+ *
+ * @param {Array} history
+ * @param {object} modelTurn - { role: "model", parts: [...] } with >=1 functionCall part
+ * @param {object} userTurn  - { role: "user", parts: [...] } with the matching functionResponse parts
+ * @returns {Array} the same history array (mutated)
+ * @throws {Error} if the pair is malformed or per-name call/response counts differ
+ */
+function appendFunctionExchange(history, modelTurn, userTurn) {
+  if (!Array.isArray(history)) {
+    throw new Error("appendFunctionExchange: history must be an array.");
+  }
+  if (!modelTurn || modelTurn.role !== "model" || !Array.isArray(modelTurn.parts)) {
+    throw new Error('appendFunctionExchange: modelTurn must be { role: "model", parts: [...] }.');
+  }
+  if (!userTurn || userTurn.role !== "user" || !Array.isArray(userTurn.parts)) {
+    throw new Error('appendFunctionExchange: userTurn must be { role: "user", parts: [...] }.');
+  }
+
+  // Count functionCalls per tool name in the model turn.
+  const callCounts = {};
+  for (const p of modelTurn.parts) {
+    if (p && p.functionCall && p.functionCall.name) {
+      const name = p.functionCall.name;
+      callCounts[name] = (callCounts[name] || 0) + 1;
+    }
+  }
+  const totalCalls = Object.values(callCounts).reduce((a, b) => a + b, 0);
+  if (totalCalls === 0) {
+    throw new Error("appendFunctionExchange: modelTurn contains no functionCall parts.");
+  }
+
+  // Count functionResponses per tool name in the user turn.
+  const responseCounts = {};
+  for (const p of userTurn.parts) {
+    const fr = p && p.functionResponse;
+    if (fr && fr.name) {
+      responseCounts[fr.name] = (responseCounts[fr.name] || 0) + 1;
+    }
+  }
+
+  // Every called tool must have exactly as many responses...
+  for (const name of Object.keys(callCounts)) {
+    if (callCounts[name] !== (responseCounts[name] || 0)) {
+      throw new Error(
+        `appendFunctionExchange: function call/response mismatch for "${name}" ` +
+        `(calls=${callCounts[name]}, responses=${responseCounts[name] || 0}).`
+      );
+    }
+  }
+  // ...and there must be no responses for tools that were not called.
+  for (const name of Object.keys(responseCounts)) {
+    if (!callCounts[name]) {
+      throw new Error(
+        `appendFunctionExchange: functionResponse for uncalled tool "${name}".`
+      );
+    }
+  }
+
+  history.push(modelTurn);
+  history.push(userTurn);
+  return history;
+}
+
+/**
  * Tier 2 Recovery: Remove ALL function call/response pairs from history
  * Keeps only regular text messages
  */
@@ -237,6 +312,7 @@ export {
   maintainHistoryWindow,
   validateHistoryPairs,
   sanitizeHistory,
+  appendFunctionExchange,
   removeAllFunctionPairs,
   createFreshStartWithContext
 };
