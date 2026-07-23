@@ -6,7 +6,7 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Gemini AI for Office"/>
   <Description DefaultValue="Gemini AI for Office is an AI-powered assistant that helps you with your documents."/>
-  <IconUrl DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-32.png"/>
+  <IconUrl DefaultValue="https://moosadr-arch.github.io/REPONAME/assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-64.png"/>
   <SupportUrl DefaultValue="https://www.reference.legal"/>
   <AppDomains>
