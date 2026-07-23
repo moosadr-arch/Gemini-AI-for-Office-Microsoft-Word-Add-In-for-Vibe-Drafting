@@ -6,8 +6,8 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Gemini AI for Office"/>
   <Description DefaultValue="Gemini AI for Office is an AI-powered assistant that helps you with your documents."/>
-  <IconUrl DefaultValue="https://localhost:3000/assets/icon-32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-64.png"/>
+  <IconUrl DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-64.png"/>
   <SupportUrl DefaultValue="https://www.reference.legal"/>
   <AppDomains>
     <AppDomain>https://www.reference.legal</AppDomain>
@@ -21,7 +21,7 @@
     </Sets>
   </Requirements>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://localhost:3000/taskpane.html"/>
+    <SourceLocation DefaultValue="https://USERNAME.github.io/REPONAME/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -67,14 +67,14 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/assets/icon-16.png"/>
-        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/assets/icon-32.png"/>
-        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/assets/icon-80.png"/>
+        <bt:Image id="Icon.16x16" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
-        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://USERNAME.github.io/REPONAME/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://USERNAME.github.io/REPONAME/taskpane.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Ask Gemini AI to edit your document!"/>
@@ -132,15 +132,15 @@
       </Hosts>
       <Resources>
         <bt:Images>
-          <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/assets/icon-16.png"/>
-          <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/assets/icon-32.png"/>
-          <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/assets/icon-80.png"/>
+          <bt:Image id="Icon.16x16" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-16.png"/>
+          <bt:Image id="Icon.32x32" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-32.png"/>
+          <bt:Image id="Icon.80x80" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-80.png"/>
         </bt:Images>
         <bt:Urls>
           <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
-          <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
-          <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
-          <bt:Url id="Shortcuts.Url" DefaultValue="https://localhost:3000/shortcuts.json"/>
+          <bt:Url id="Commands.Url" DefaultValue="https://USERNAME.github.io/REPONAME/commands.html"/>
+          <bt:Url id="Taskpane.Url" DefaultValue="https://USERNAME.github.io/REPONAME/taskpane.html"/>
+          <bt:Url id="Shortcuts.Url" DefaultValue="https://USERNAME.github.io/REPONAME/shortcuts.json"/>
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="GetStarted.Title" DefaultValue="Ask Gemini AI to edit your document!"/>
