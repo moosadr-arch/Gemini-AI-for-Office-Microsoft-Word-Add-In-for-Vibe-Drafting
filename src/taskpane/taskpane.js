@@ -587,12 +587,7 @@ function loadApiKey() {
 }
 
 function loadModel(type = 'fast') {
-  const key = type === 'slow' ? "geminiModelSlow" : "geminiModelFast";
-  const storedModel = localStorage.getItem(key);
-  if (storedModel && storedModel.trim() !== "" && storedModel !== "gemini-2.5-pro" && storedModel !== "gemini-flash-latest") {
-    return storedModel;
-  }
-  // Defaults (New Models)
+  // Force new models directly, bypassing any old browser cache
   return type === 'slow' ? "gemini-3.1-pro" : "gemini-3.6-flash";
 }
 
