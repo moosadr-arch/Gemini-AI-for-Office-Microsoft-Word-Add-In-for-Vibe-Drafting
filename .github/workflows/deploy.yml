@@ -6,7 +6,6 @@ on:
 
 jobs:
   build-and-deploy:
-  # پرش خودکار برای آماده‌سازی فایل‌ها توسط سرور گیت‌هاب
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -42,4 +41,4 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-running: true
+  cancel-in-progress: true
