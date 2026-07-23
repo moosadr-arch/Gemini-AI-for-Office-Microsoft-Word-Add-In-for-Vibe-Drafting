@@ -587,11 +587,13 @@ function loadApiKey() {
 }
 
 function loadModel(type = 'fast') {
-  // مدل تفکر عمیق و تحلیلی (دکمه Think):
-  if (type === 'slow') return "gemini-3.1-pro";
-  
-  // مدل کارهای سریع و ویرایش‌های ساده (دکمه Send):
-  return "gemini-3.6-flash";
+  const key = type === 'slow' ? "geminiModelSlow" : "geminiModelFast";
+  const storedModel = localStorage.getItem(key);
+  if (storedModel && storedModel.trim() !== "" && storedModel !== "gemini-2.5-pro" && storedModel !== "gemini-flash-latest") {
+    return storedModel;
+  }
+  // Defaults (New Models)
+  return type === 'slow' ? "gemini-3.1-pro" : "gemini-3.6-flash";
 }
 
 function loadSystemMessage() {
