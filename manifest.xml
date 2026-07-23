@@ -9,7 +9,9 @@
   <IconUrl DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting//assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-64.png"/>
   <SupportUrl DefaultValue="https://www.reference.legal"/>
+  <SupportUrl DefaultValue="https://www.reference.legal"/>
   <AppDomains>
+    <AppDomain>https://moosadr-arch.github.io</AppDomain>
     <AppDomain>https://www.reference.legal</AppDomain>
   </AppDomains>
   <Hosts>
