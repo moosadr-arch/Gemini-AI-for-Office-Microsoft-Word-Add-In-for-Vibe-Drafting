@@ -69,14 +69,14 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16x16" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-16.png"/>
-        <bt:Image id="Icon.32x32" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-32.png"/>
-        <bt:Image id="Icon.80x80" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-80.png"/>
+        <bt:Image id="Icon.16x16" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
-        <bt:Url id="Commands.Url" DefaultValue="https://USERNAME.github.io/REPONAME/commands.html"/>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://USERNAME.github.io/REPONAME/taskpane.html"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/taskpane.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Ask Gemini AI to edit your document!"/>
@@ -134,15 +134,15 @@
       </Hosts>
       <Resources>
         <bt:Images>
-          <bt:Image id="Icon.16x16" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-16.png"/>
-          <bt:Image id="Icon.32x32" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-32.png"/>
-          <bt:Image id="Icon.80x80" DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-80.png"/>
+          <bt:Image id="Icon.16x16" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-16.png"/>
+          <bt:Image id="Icon.32x32" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-32.png"/>
+          <bt:Image id="Icon.80x80" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-80.png"/>
         </bt:Images>
         <bt:Urls>
           <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
-          <bt:Url id="Commands.Url" DefaultValue="https://USERNAME.github.io/REPONAME/commands.html"/>
-          <bt:Url id="Taskpane.Url" DefaultValue="https://USERNAME.github.io/REPONAME/taskpane.html"/>
-          <bt:Url id="Shortcuts.Url" DefaultValue="https://USERNAME.github.io/REPONAME/shortcuts.json"/>
+          <bt:Url id="Commands.Url" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/commands.html"/>
+          <bt:Url id="Taskpane.Url" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/taskpane.html"/>
+          <bt:Url id="Shortcuts.Url" DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/shortcuts.json"/>
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="GetStarted.Title" DefaultValue="Ask Gemini AI to edit your document!"/>
