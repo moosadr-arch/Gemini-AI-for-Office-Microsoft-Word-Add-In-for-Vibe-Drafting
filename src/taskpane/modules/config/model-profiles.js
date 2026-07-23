@@ -44,8 +44,9 @@ const MODEL_PROFILES = {
   "gemini-2.5-flash": { ...COMMON },
   "gemini-flash-latest": { ...COMMON },
   "gemini-flash-lite-latest": { ...COMMON, toolCallReliability: "medium" },
-  // 3.x are preview/throttled relative to 2.5; the timeout warning telling users
-  // to revert to 2.5 only makes sense for these models.
+  // اضافه شدن مدل‌های جدید
+  "gemini-3.1-pro": { ...COMMON, previewThrottleWarning: true },
+  "gemini-3.6-flash": { ...COMMON, previewThrottleWarning: true },
   "gemini-3.5-flash": { ...COMMON, previewThrottleWarning: true },
   "gemini-3.1-pro-preview": { ...COMMON, previewThrottleWarning: true },
 };
