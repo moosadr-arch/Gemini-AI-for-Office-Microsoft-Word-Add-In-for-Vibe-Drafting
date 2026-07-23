@@ -6,8 +6,8 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Gemini AI for Office"/>
   <Description DefaultValue="Gemini AI for Office is an AI-powered assistant that helps you with your documents."/>
-  <IconUrl DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting//assets/icon-32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://USERNAME.github.io/REPONAME/assets/icon-64.png"/>
+  <IconUrl DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/assets/icon-64.png"/>
   <SupportUrl DefaultValue="https://www.reference.legal"/>
   <SupportUrl DefaultValue="https://www.reference.legal"/>
   <AppDomains>
@@ -23,7 +23,7 @@
     </Sets>
   </Requirements>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://USERNAME.github.io/REPONAME/taskpane.html"/>
+    <SourceLocation DefaultValue="https://moosadr-arch.github.io/https://github.com/moosadr-arch/Gemini-AI-for-Office-Microsoft-Word-Add-In-for-Vibe-Drafting/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
